@@ -208,26 +208,48 @@ class App < Sinatra::Base
 
     sleep 1.0
 
-    rows = db.query('SELECT id FROM channel').to_a
-    channel_ids = rows.map { |row| row['id'] }
+    statement = db.prepare('SELECT c.id, h.message_id FROM channel c left join haveread h on c.id = h.channel_id and h.user_id = ?')
+    rows = statement.execute(user_id).to_a
+    statement.close
+    # channel_ids = rows.map { |row| row['id'] }
 
     res = []
-    channel_ids.each do |channel_id|
-      statement = db.prepare('SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?')
-      row = statement.execute(user_id, channel_id).first
-      statement.close
+    rows.each do |row|
       r = {}
       r['channel_id'] = channel_id
-      r['unread'] = if row.nil?
+      r['unread'] = if row['message_id'].nil?
         statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
         statement.execute(channel_id).first['cnt']
       else
         statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
         statement.execute(channel_id, row['message_id']).first['cnt']
       end
-      statement.close
-      res << r
     end
+    statement.close
+    res << r
+
+
+#     res = []
+# #     N+1
+#     channel_ids.each do |channel_id|
+#       statement = db.prepare('SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?')
+#       row = statement.execute(user_id, channel_id).first
+#       statement.close
+#       r = {}
+#       r['channel_id'] = channel_id
+# #       何個読んでないかを数える
+#       r['unread'] = if row.nil?
+#         statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
+#         statement.execute(channel_id).first['cnt']
+#       else
+# #       既読のidより大きいものの数を数える
+#         statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
+#         statement.execute(channel_id, row['message_id']).first['cnt']
+#       end
+#       statement.close
+# #       resに格納
+#       res << r
+#     end
 
     content_type :json
     res.to_json
