@@ -116,7 +116,7 @@ class App < Sinatra::Base
     db.query("DELETE FROM haveread")
     redis.flushall
     # messageに複合インデックス (id,channel_id)を貼る
-    db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
+    # db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
     initialize_channel_message_count
     initialize_message
     204
@@ -351,7 +351,7 @@ class App < Sinatra::Base
     ids = get_all_channel_ids << new_id
     redis.set(all_channel_ids_key, ids)
 
-    redirect "/channel/#{channel_id}", 303
+    redirect "/channel/#{new_id}", 303
   end
 
   post '/profile' do
