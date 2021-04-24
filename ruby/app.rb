@@ -226,7 +226,6 @@ class App < Sinatra::Base
       statement.close
     end
     response.reverse!
-    statement.close
     set_user_channel_message_count(user_id, channel_id)
 
     content_type :json
