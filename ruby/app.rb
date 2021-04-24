@@ -408,10 +408,52 @@ class App < Sinatra::Base
   end
 
   def db_get_user(user_id)
-    statement = db.prepare('SELECT * FROM user WHERE id = ?')
-    user = statement.execute(user_id).first
-    statement.close
-    user
+    user_data = redis.get "users:#{user_id}"
+    if user_data
+      JSON.load(user_data)
+    else
+      nil
+    end
+  end
+
+  def initialize_user
+    users = db.prepare('SELECT * FROM user').execute
+    redis.set "user_key", users.size
+    redis.mset users.map{|h| ["users:#{h['id']}", h.to_json]}.flatten
+    redis.mset users.map{|h| ["user_name:#{h['name']}", h['id']]}.flatten
+    users.close
+  end
+
+  def get_user_by_name(name)
+    id = redis.get "user_name:#{name}"
+    JSON.load(redis.get("users:#{id}"))
+  end
+
+  def get_users_by_ids(ids)
+    return [] if ids.size == 0
+    redis.mget(*ids.map{|id| "users:#{id}"}).map{|d| JSON.load(d)}
+  end
+
+  def set_user(user)
+    redis.set "users:#{user['id']}", user.to_json
+  end
+
+  def initialize_message
+    messages = db.prepare('SELECT * FROM message').execute
+
+    redis.set "message_key", messages.size
+    messages.group_by{|h| h['channel_id']}.each do |channel_id, messages|
+      messages.each do |h|
+        redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
+      end
+    end
+    message.close
+  end
+
+  def initialize_channel_message_count
+    channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
+    redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+    channel_count.close
   end
 
   def db_add_message(channel_id, user_id, content)
