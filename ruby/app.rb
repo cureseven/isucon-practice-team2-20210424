@@ -172,16 +172,19 @@ class App < Sinatra::Base
 
     channel_id = params[:channel_id].to_i
     last_message_id = params[:last_message_id].to_i
-    statement = db.prepare('SELECT * FROM message WHERE id > ? AND channel_id = ? ORDER BY id DESC LIMIT 100')
+    statement = db.prepare('SELECT * FROM message join user on user.id = message.user_id WHERE id > ? AND channel_id = ? ORDER BY id DESC LIMIT 100')
     rows = statement.execute(last_message_id, channel_id).to_a
     response = []
     rows.each do |row|
       r = {}
-      r['id'] = row['id']
-      statement = db.prepare('SELECT name, display_name, avatar_icon FROM user WHERE id = ?')
-      r['user'] = statement.execute(row['user_id']).first
-      r['date'] = row['created_at'].strftime("%Y/%m/%d %H:%M:%S")
-      r['content'] = row['content']
+      r['id'] = row['message']['id']
+
+      r['user']['avatar_icon'] = row['user']['avatar_icon']
+      r['user']['name'] = row['user']['name']
+      r['user']['display_name'] = row['user']['display_name']
+
+      r['date'] = row['message']['created_at'].strftime("%Y/%m/%d %H:%M:%S")
+      r['content'] = row['message']['content']
       response << r
       statement.close
     end
