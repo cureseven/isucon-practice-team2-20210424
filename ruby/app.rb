@@ -426,6 +426,7 @@ class App < Sinatra::Base
     redis.set "user_key", users.size
     redis.mset users.map{|h| ["users:#{h['id']}", h.to_json]}.flatten
     redis.mset users.map{|h| ["user_name:#{h['name']}", h['id']]}.flatten
+    users.close
   end
 
   def get_user_by_name(name)
@@ -451,11 +452,13 @@ class App < Sinatra::Base
         redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
       end
     end
+    message.close
   end
 
   def initialize_channel_message_count
     channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
     redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+    channel_count.close
   end
 
   def db_add_message(channel_id, user_id, content)
