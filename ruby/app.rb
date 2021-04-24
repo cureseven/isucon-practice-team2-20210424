@@ -172,7 +172,7 @@ class App < Sinatra::Base
 
     channel_id = params[:channel_id].to_i
     last_message_id = params[:last_message_id].to_i
-    statement = db.prepare('SELECT * FROM message join user on user.id = message.user_id WHERE message.id > ? AND channel_id = ? ORDER BY message.id DESC LIMIT 100')
+    statement = db.prepare('SELECT * FROM message join user on user.id = message.user_id WHERE message.id > ? AND message.channel_id = ? ORDER BY message.id DESC LIMIT 100')
     rows = statement.execute(last_message_id, channel_id).to_a
     response = []
     rows.each do |row|
