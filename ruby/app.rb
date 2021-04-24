@@ -74,6 +74,7 @@ class App < Sinatra::Base
     def set_all_channel_ids
       ids = db.query('SELECT id FROM channel').to_a.map{|row| row['id'] }
       redis.set(all_channel_ids_key, ids.to_json)
+      ids.close
       ids
     end
 
@@ -85,6 +86,7 @@ class App < Sinatra::Base
     def set_all_channels_order_by_id
       channels = db.query('SELECT * FROM channel ORDER BY id').to_a
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
+      channels.close
       channels
     end
 
@@ -109,11 +111,13 @@ class App < Sinatra::Base
           redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
         end
       end
+      messages.close
     end
 
     def initialize_channel_message_count
       channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
       redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+      channel_count.close
     end
   end
 
@@ -224,7 +228,7 @@ class App < Sinatra::Base
       statement.close
     end
     response.reverse!
-
+    statement.close
     set_user_channel_message_count(user_id, channel_id)
 
     content_type :json
