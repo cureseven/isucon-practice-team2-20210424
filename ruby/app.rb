@@ -83,6 +83,14 @@ class App < Sinatra::Base
       channels
     end
 
+    def get_channel_message_counts(channel_ids)
+      redis.mget(*channel_ids.map{|id| "channel_message_count:#{id}"}).map(&:to_i)
+    end
+
+    def get_user_channel_message_counts(user_id, channel_ids)
+      redis.mget(*channel_ids.map{|id| "user_channel_message_count:#{user_id}:#{id}"}).map(&:to_i)
+    end
+
     def initialize_message
       messages = db.prepare('SELECT * FROM message').execute
 
@@ -226,22 +234,17 @@ class App < Sinatra::Base
     sleep 1.0
 
     channel_ids = get_all_channel_ids
-
+    channel_message_counts = get_channel_message_counts(channel_ids)
+    user_channel_message_counts = get_user_channel_message_counts(channel_ids, user_id)
     res = []
-    channel_ids.each do |channel_id|
-      statement = db.prepare('SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?')
-      row = statement.execute(user_id, channel_id).first
-      statement.close
+    channel_ids.each do |channel_id, index|
       r = {}
       r['channel_id'] = channel_id
-      r['unread'] = if row.nil?
-        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
-        statement.execute(channel_id).first['cnt']
-      else
-        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
-        statement.execute(channel_id, row['message_id']).first['cnt']
+      unread = channel_message_counts[index]
+      if user_channel_message_counts[index] != 0
+        unread = channel_message_counts[index] - user_channel_message_counts[index]
       end
-      statement.close
+      r['unread'] = unread
       res << r
     end
 
