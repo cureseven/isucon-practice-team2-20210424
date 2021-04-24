@@ -175,7 +175,6 @@ class App < Sinatra::Base
   end
 
   post '/login' do
-    sleep 1
     name = params[:name]
     statement = db.prepare('SELECT * FROM user WHERE name = ?')
     row = statement.execute(name).first
@@ -244,7 +243,7 @@ class App < Sinatra::Base
     channel_message_counts = get_channel_message_counts(channel_ids)
     user_channel_message_counts = get_user_channel_message_counts(user_id, channel_ids)
     res = []
-    channel_ids.each do |channel_id, index|
+    channel_ids.each do |channel_id, i  ndex|
       r = {}
       r['channel_id'] = channel_id
       unread = channel_message_counts[index]
