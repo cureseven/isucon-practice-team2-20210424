@@ -63,6 +63,22 @@ class App < Sinatra::Base
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
       channels
     end
+
+    def initialize_message
+      messages = db.prepare('SELECT * FROM message').execute
+
+      redis.set "message_key", messages.size
+      messages.group_by{|h| h['channel_id']}.each do |channel_id, messages|
+        messages.each do |h|
+          redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
+        end
+      end
+    end
+
+    def initialize_channel_message_count
+      channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
+      redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+    end
   end
 
   get '/initialize' do
@@ -71,10 +87,11 @@ class App < Sinatra::Base
     db.query("DELETE FROM channel WHERE id > 10")
     db.query("DELETE FROM message WHERE id > 10000")
     db.query("DELETE FROM haveread")
-
+    redis.flushall
     # messageに複合インデックス (id,channel_id)を貼る
     db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
-
+    initialize_channel_message_count
+    initialize_message
     204
   end
 
