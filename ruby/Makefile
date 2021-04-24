@@ -4,6 +4,7 @@ gogo:
 	sudo systemctl stop mysql
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
+	sudo truncate --size 0 /var/log/mysql/mysql-slow.log
 	sudo systemctl start mysql 
 	sudo systemctl start isubata.ruby.service
 	sudo systemctl start nginx
