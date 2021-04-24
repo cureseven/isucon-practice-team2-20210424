@@ -211,8 +211,8 @@ class App < Sinatra::Base
 
     channel_id = params[:channel_id].to_i
     last_message_id = params[:last_message_id].to_i
-    statement = db.prepare('SELECT * FROM message WHERE id > ? AND channel_id = ? ORDER BY id DESC LIMIT 100')
-    rows = statement.execute(last_message_id, channel_id).to_a
+    rows = get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: last_message_id)
+    
     response = []
     rows.each do |row|
       r = {}
@@ -275,9 +275,8 @@ class App < Sinatra::Base
     @page = @page.to_i
 
     n = 20
-    statement = db.prepare('SELECT * FROM message WHERE channel_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
-    rows = statement.execute(@channel_id, n, (@page - 1) * n).to_a
-    statement.close
+    rows = get_message_by_channel_id_and_last_message_id(@channel_id, offset: (@page - 1) * n, limit: n)
+
     @messages = []
     rows.each do |row|
       r = {}
@@ -291,9 +290,7 @@ class App < Sinatra::Base
     end
     @messages.reverse!
 
-    statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
-    cnt = statement.execute(@channel_id).first['cnt'].to_f
-    statement.close
+    cnt = get_channel_messge_count(@channel_id).to_f
     @max_page = cnt == 0 ? 1 :(cnt / n).ceil
 
     return 400 if @page > @max_page
@@ -452,13 +449,28 @@ class App < Sinatra::Base
   end
 
   def db_add_message(channel_id, user_id, content)
-    statement = db.prepare('INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())')
-    messages = statement.execute(channel_id, user_id, content)
-    statement.close
-
+    id = redis.incr "message_key"
+    data = {
+      id: id,
+      user_id: user_id,
+      channel_id: channel_id,
+      content: content,
+      created_at: Time.now,
+    }
+    redis.zadd "messages:#{channel_id}", id, data.to_json
     redis.incr "channel_message_count:#{channel_id}"
 
-    messages
+    data
+  end
+
+  def get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: 0, limit: 100, offset: 0)
+    data = redis.zrevrangebyscore("messages:#{channel_id}", 100_000_000, (last_message_id.to_i + 1), :limit => [offset, limit])
+
+    if data
+      data.map{|d| d=JSON.load(d);d['created_at'] = Time.parse(d['created_at']);d}
+    else
+      nil
+    end
   end
 
   def random_string(n)
@@ -485,6 +497,10 @@ class App < Sinatra::Base
       end
     end
     [channels, description]
+  end
+
+  def get_channel_messge_count(channel_id)
+    redis.get("channel_message_count:#{channel_id}").to_i
   end
 
   def ext2mime(ext)
