@@ -177,17 +177,19 @@ class App < Sinatra::Base
     response = []
     rows.each do |row|
       r = {}
-      r['id'] = row['message']['id']
+      message = row['message']
+      user = row['user']
+      responseUser = r['user'] 
 
-      r['user']['avatar_icon'] = row['user']['avatar_icon']
-      r['user']['name'] = row['user']['name']
-      r['user']['display_name'] = row['user']['display_name']
-
-      r['date'] = row['message']['created_at'].strftime("%Y/%m/%d %H:%M:%S")
-      r['content'] = row['message']['content']
+      r['id'] = message['id']
+      responseUser['avatar_icon'] = user['avatar_icon']
+      responseUser['name'] = user['name']
+      responseUser['display_name'] = user['display_name']
+      r['date'] = message['created_at'].strftime("%Y/%m/%d %H:%M:%S")
+      r['content'] = message['content']
       response << r
-      statement.close
     end
+    statement.close
     response.reverse!
 
     max_message_id = rows.empty? ? 0 : rows.map { |row| row['id'] }.max
