@@ -1,6 +1,7 @@
 require 'digest/sha1'
 require 'mysql2'
 require 'sinatra/base'
+require "redis"
 
 class App < Sinatra::Base
   configure do
@@ -9,6 +10,8 @@ class App < Sinatra::Base
     set :avatar_max_size, 1 * 1024 * 1024
 
     enable :sessions
+    redis = Redis.new(host: '127.0.0.1')
+    Redis.current = redis
   end
 
   configure :development do
@@ -30,6 +33,9 @@ class App < Sinatra::Base
       end
 
       @_user
+    end
+    def redis
+      @redis ||= Redis.current
     end
     def image_file_path(filename)
       "#{public_path}/icons/#{filename}"
