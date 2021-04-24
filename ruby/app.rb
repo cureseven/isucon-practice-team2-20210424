@@ -49,6 +49,19 @@ class App < Sinatra::Base
       "all_channels_order_by_id"
     end
 
+    def all_channel_ids_key
+      "all_channel_ids"
+    end
+
+    def get_all_channel_ids
+      ids_json = redis.get(all_channel_ids_key)
+      if ids_json
+        JSON.parse(ids_json)
+      else
+        set_all_channel_ids
+      end
+    end
+
     def get_all_channels_order_by_id
       rows = redis.zrange(all_channels_order_by_id_key, 0, -1)
       if rows.length == 0
@@ -56,6 +69,12 @@ class App < Sinatra::Base
       else
         rows.map {|row| JSON.parse(row) }
       end
+    end
+
+    def set_all_channel_ids
+      ids = db.query('SELECT id FROM channel').to_a.map{|row| row['id'] }
+      redis.set(all_channel_ids_key, ids.to_json)
+      ids
     end
 
     def set_all_channels_order_by_id
@@ -206,8 +225,7 @@ class App < Sinatra::Base
 
     sleep 1.0
 
-    rows = db.query('SELECT id FROM channel').to_a
-    channel_ids = rows.map { |row| row['id'] }
+    channel_ids = get_all_channel_ids
 
     res = []
     channel_ids.each do |channel_id|
@@ -314,10 +332,22 @@ class App < Sinatra::Base
     if name.nil? || description.nil?
       return 400
     end
-    statement = db.prepare('INSERT INTO channel (name, description, updated_at, created_at) VALUES (?, ?, NOW(), NOW())')
-    statement.execute(name, description)
-    channel_id = db.last_id
-    statement.close
+    _channel, id = redis.zrange(all_channels_order_by_id_key, -1, -1, with_scores: true).last # get max id
+    new_id = id.to_i + 1
+    now = Time.now
+    attributes = {
+      'id': new_id,
+      'name': name,
+      'description': description,
+      'updated_at': now.to_s,
+      'created_at': now.to_s,
+    }
+    redis.zadd(all_channels_order_by_id_key, [new_id, attributes.to_json])
+
+    # Refresh all_channel_ids
+    ids = get_all_channel_ids << new_id
+    redis.set(all_channel_ids_key, ids)
+
     redirect "/channel/#{channel_id}", 303
   end
 
