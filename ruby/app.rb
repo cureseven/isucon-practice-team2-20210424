@@ -81,6 +81,22 @@ class App < Sinatra::Base
     end
   end
 
+  # user.idでソートしたuserを「users:user_name」みたいなキーで保存
+  def initialize_user
+    users = db.prepare('SELECT * FROM user').execute
+    redis.mset users.map{|u| ["user_name:#{u['name']}", u.to_json]}.flatten
+    users
+  end
+
+  # キャッシュを返す
+  def get_user_by_name(name)
+    user_json = redis.get "user_name:#{name}"
+    if name.nil?
+      return JSON.parse(user_json)
+    end
+    nil
+  end
+
   get '/initialize' do
     db.query("DELETE FROM user WHERE id > 1000")
     db.query("DELETE FROM image WHERE id > 1001")
@@ -89,9 +105,10 @@ class App < Sinatra::Base
     db.query("DELETE FROM haveread")
     redis.flushall
     # messageに複合インデックス (id,channel_id)を貼る
-    db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
+    # db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
     initialize_channel_message_count
     initialize_message
+    initialize_user
     204
   end
 
@@ -129,6 +146,7 @@ class App < Sinatra::Base
       raise e
     end
     session[:user_id] = user_id
+    initialize_user
     redirect '/', 303
   end
 
@@ -138,13 +156,12 @@ class App < Sinatra::Base
 
   post '/login' do
     name = params[:name]
-    statement = db.prepare('SELECT * FROM user WHERE name = ?')
-    row = statement.execute(name).first
+    # キャッシュから取得するようにした
+    row = get_user_by_name(name)
     if row.nil? || row['password'] != Digest::SHA1.hexdigest(row['salt'] + params[:password])
       return 403
     end
     session[:user_id] = row['id']
-    statement.close
     redirect '/', 303
   end
 
@@ -285,9 +302,7 @@ class App < Sinatra::Base
     @channels, = get_channel_list_info
 
     user_name = params[:user_name]
-    statement = db.prepare('SELECT * FROM user WHERE name = ?')
-    @user = statement.execute(user_name).first
-    statement.close
+    @user = get_user_by_name(user_name)
 
     if @user.nil?
       return 404
@@ -372,6 +387,7 @@ class App < Sinatra::Base
       statement.execute(display_name, user['id'])
       statement.close
     end
+    initialize_user
 
     redirect '/', 303
   end
