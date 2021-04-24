@@ -77,6 +77,11 @@ class App < Sinatra::Base
       ids
     end
 
+    def set_user_channel_message_count(user_id, channel_id)
+      count = channel_message_count(channel_id)
+      redis.set "user_channel_message_count:#{user_id}:#{channel_id}", count
+    end
+
     def set_all_channels_order_by_id
       channels = db.query('SELECT * FROM channel ORDER BY id').to_a
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
@@ -89,6 +94,10 @@ class App < Sinatra::Base
 
     def get_user_channel_message_counts(user_id, channel_ids)
       redis.mget(*channel_ids.map{|id| "user_channel_message_count:#{user_id}:#{id}"}).map(&:to_i)
+    end
+
+    def channel_message_count(channel_id)
+      redis.get "channel_message_count:#{channel_id}"
     end
 
     def initialize_message
@@ -168,9 +177,11 @@ class App < Sinatra::Base
     statement = db.prepare('SELECT * FROM user WHERE name = ?')
     row = statement.execute(name).first
     if row.nil? || row['password'] != Digest::SHA1.hexdigest(row['salt'] + params[:password])
+      statement.close
       return 403
     end
     session[:user_id] = row['id']
+    statement.close
     redirect '/', 303
   end
 
@@ -213,13 +224,7 @@ class App < Sinatra::Base
     end
     response.reverse!
 
-    max_message_id = rows.empty? ? 0 : rows.map { |row| row['id'] }.max
-    statement = db.prepare([
-      'INSERT INTO haveread (user_id, channel_id, message_id, updated_at, created_at) ',
-      'VALUES (?, ?, ?, NOW(), NOW()) ',
-      'ON DUPLICATE KEY UPDATE message_id = ?, updated_at = NOW()',
-    ].join)
-    statement.execute(user_id, channel_id, max_message_id, max_message_id)
+    set_user_channel_message_count(user_id, channel_id)
 
     content_type :json
     response.to_json
