@@ -88,10 +88,13 @@ class App < Sinatra::Base
     users
   end
 
-  # キャッシュにあればそれを返す．なければinitializeして返す
+  # キャッシュを返す
   def get_user_by_name(name)
     user_json = redis.get "user_name:#{name}"
-    JSON.parse(user_json)
+    if name.nil?
+      return JSON.parse(user_json)
+    end
+    nil
   end
 
   get '/initialize' do
