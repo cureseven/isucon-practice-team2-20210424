@@ -74,7 +74,6 @@ class App < Sinatra::Base
     def set_all_channel_ids
       ids = db.query('SELECT id FROM channel').to_a.map{|row| row['id'] }
       redis.set(all_channel_ids_key, ids.to_json)
-      ids.close
       ids
     end
 
@@ -86,7 +85,6 @@ class App < Sinatra::Base
     def set_all_channels_order_by_id
       channels = db.query('SELECT * FROM channel ORDER BY id').to_a
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
-      channels.close
       channels
     end
 
