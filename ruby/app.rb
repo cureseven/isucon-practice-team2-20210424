@@ -175,6 +175,7 @@ class App < Sinatra::Base
       else
         statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
         statement.execute(channel_id, row['message_id']).first['cnt']
+      end
     end
     statement.close
     res << r
