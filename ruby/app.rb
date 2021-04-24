@@ -235,7 +235,7 @@ class App < Sinatra::Base
 
     channel_ids = get_all_channel_ids
     channel_message_counts = get_channel_message_counts(channel_ids)
-    user_channel_message_counts = get_user_channel_message_counts(channel_ids, user_id)
+    user_channel_message_counts = get_user_channel_message_counts(user_id, channel_ids)
     res = []
     channel_ids.each do |channel_id, index|
       r = {}
