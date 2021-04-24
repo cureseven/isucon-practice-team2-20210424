@@ -84,7 +84,7 @@ class App < Sinatra::Base
   # user.idでソートしたuserを「users:user_name」みたいなキーで保存
   def initialize_user
     users = db.prepare('SELECT * FROM user').execute
-    redis.mset users.map{|h| ["user_name:#{h['name']}", h['id']]}.flatten
+    redis.mset users.map{|u| ["user_name:#{u['name']}", u.to_json]}.flatten
     users
   end
 
