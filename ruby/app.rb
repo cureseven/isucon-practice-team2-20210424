@@ -46,6 +46,10 @@ class App < Sinatra::Base
     db.query("DELETE FROM channel WHERE id > 10")
     db.query("DELETE FROM message WHERE id > 10000")
     db.query("DELETE FROM haveread")
+
+    # messageに複合インデックス (id,channel_id)を貼る
+    db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
+
     204
   end
 
