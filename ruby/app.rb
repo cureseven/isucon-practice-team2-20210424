@@ -1,7 +1,7 @@
 require 'digest/sha1'
 require 'mysql2'
 require 'sinatra/base'
-require 'redis'
+require "redis"
 
 class App < Sinatra::Base
   configure do
@@ -10,7 +10,6 @@ class App < Sinatra::Base
     set :avatar_max_size, 1 * 1024 * 1024
 
     enable :sessions
-
     redis = Redis.new(host: ENV["REDIS_HOST"])
     Redis.current = redis
   end
@@ -35,36 +34,15 @@ class App < Sinatra::Base
 
       @_user
     end
-
+    def redis
+      @redis ||= Redis.current
+    end
     def image_file_path(filename)
       "#{public_path}/icons/#{filename}"
     end
 
     def public_path
       File.expand_path('../../public', __FILE__)
-    end
-
-    def redis
-      @redis ||= Redis.current
-    end
-
-    def all_channel_ids_key
-      "all_channel_ids"
-    end
-
-    def get_all_channel_ids
-      ids_json = redis.get(all_channel_ids_key)
-      if ids_json
-        JSON.parse(ids_json)
-      else
-        set_all_channel_ids
-      end
-    end
-
-    def set_all_channel_ids
-      ids = db.query('SELECT id FROM channel').to_a.map{|row| row['id'] }
-      redis.set(all_channel_ids_key, ids.to_json)
-      ids
     end
 
     def all_channels_order_by_id_key
@@ -85,6 +63,22 @@ class App < Sinatra::Base
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
       channels
     end
+
+    def initialize_message
+      messages = db.prepare('SELECT * FROM message').execute
+
+      redis.set "message_key", messages.size
+      messages.group_by{|h| h['channel_id']}.each do |channel_id, messages|
+        messages.each do |h|
+          redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
+        end
+      end
+    end
+
+    def initialize_channel_message_count
+      channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
+      redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+    end
   end
 
   get '/initialize' do
@@ -93,13 +87,11 @@ class App < Sinatra::Base
     db.query("DELETE FROM channel WHERE id > 10")
     db.query("DELETE FROM message WHERE id > 10000")
     db.query("DELETE FROM haveread")
-
     redis.flushall
-
+    # messageに複合インデックス (id,channel_id)を貼る
+    db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
     initialize_channel_message_count
-    initialize_user
     initialize_message
-
     204
   end
 
@@ -132,8 +124,8 @@ class App < Sinatra::Base
     end
     begin
       user_id = register(name, pw)
-    rescue => e
-      return 409 if e.message == "register"
+    rescue Mysql2::Error => e
+      return 409 if e.error_number == 1062
       raise e
     end
     session[:user_id] = user_id
@@ -146,11 +138,13 @@ class App < Sinatra::Base
 
   post '/login' do
     name = params[:name]
-    row = get_user_by_name(name)
+    statement = db.prepare('SELECT * FROM user WHERE name = ?')
+    row = statement.execute(name).first
     if row.nil? || row['password'] != Digest::SHA1.hexdigest(row['salt'] + params[:password])
       return 403
     end
     session[:user_id] = row['id']
+    statement.close
     redirect '/', 303
   end
 
@@ -178,25 +172,30 @@ class App < Sinatra::Base
 
     channel_id = params[:channel_id].to_i
     last_message_id = params[:last_message_id].to_i
-
-    rows = get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: last_message_id)
-
-    user_ids = rows.map{|h| h['user_id']}
-    users = get_users_by_ids(user_ids)
-
+    statement = db.prepare('SELECT * FROM message WHERE id > ? AND channel_id = ? ORDER BY id DESC LIMIT 100')
+    rows = statement.execute(last_message_id, channel_id).to_a
     response = []
-    rows.each_with_index do |row, index|
+    rows.each do |row|
       r = {}
       r['id'] = row['id']
-      r['user'] = users[index]
+      statement = db.prepare('SELECT name, display_name, avatar_icon FROM user WHERE id = ?')
+      r['user'] = statement.execute(row['user_id']).first
       r['date'] = row['created_at'].strftime("%Y/%m/%d %H:%M:%S")
       r['content'] = row['content']
       response << r
+      statement.close
     end
     response.reverse!
 
-    set_user_channel_message_count(user_id, channel_id)
-
+    max_message_id = rows.empty? ? 0 : rows.map { |row| row['id'] }.max
+    statement = db.prepare([
+      'INSERT INTO haveread (user_id, channel_id, message_id, updated_at, created_at) ',
+      'VALUES (?, ?, ?, NOW(), NOW()) ',
+      'ON DUPLICATE KEY UPDATE message_id = ?, updated_at = NOW()',
+    ].join)
+    statement.execute(user_id, channel_id, max_message_id, max_message_id)
+    statement.close
+    
     content_type :json
     response.to_json
   end
@@ -209,16 +208,24 @@ class App < Sinatra::Base
 
     sleep 1.0
 
-    channel_ids = get_all_channel_ids
-
-    channel_message_counts = get_channel_message_counts(channel_ids)
-    user_channel_message_counts = get_user_channel_message_counts(user_id, channel_ids)
+    rows = db.query('SELECT id FROM channel').to_a
+    channel_ids = rows.map { |row| row['id'] }
 
     res = []
-    channel_ids.each_with_index do |channel_id, index|
+    channel_ids.each do |channel_id|
+      statement = db.prepare('SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?')
+      row = statement.execute(user_id, channel_id).first
+      statement.close
       r = {}
       r['channel_id'] = channel_id
-      r['unread'] = user_channel_message_counts[index] != 0 ? channel_message_counts[index] - user_channel_message_counts[index] : channel_message_counts[index]
+      r['unread'] = if row.nil?
+        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
+        statement.execute(channel_id).first['cnt']
+      else
+        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
+        statement.execute(channel_id, row['message_id']).first['cnt']
+      end
+      statement.close
       res << r
     end
 
@@ -243,24 +250,25 @@ class App < Sinatra::Base
     @page = @page.to_i
 
     n = 20
-    rows = get_message_by_channel_id_and_last_message_id(@channel_id, offset: (@page - 1) * n, limit: n)
-
-    user_ids = rows.map{|h| h['user_id']}
-    users = get_users_by_ids(user_ids)
-
+    statement = db.prepare('SELECT * FROM message WHERE channel_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
+    rows = statement.execute(@channel_id, n, (@page - 1) * n).to_a
+    statement.close
     @messages = []
-    rows.each_with_index do |row, index|
+    rows.each do |row|
       r = {}
       r['id'] = row['id']
-
-      r['user'] = users[index]
+      statement = db.prepare('SELECT name, display_name, avatar_icon FROM user WHERE id = ?')
+      r['user'] = statement.execute(row['user_id']).first
       r['date'] = row['created_at'].strftime("%Y/%m/%d %H:%M:%S")
       r['content'] = row['content']
       @messages << r
+      statement.close
     end
     @messages.reverse!
 
-    cnt = get_channel_messge_count(@channel_id).to_f
+    statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
+    cnt = statement.execute(@channel_id).first['cnt'].to_f
+    statement.close
     @max_page = cnt == 0 ? 1 :(cnt / n).ceil
 
     return 400 if @page > @max_page
@@ -277,7 +285,9 @@ class App < Sinatra::Base
     @channels, = get_channel_list_info
 
     user_name = params[:user_name]
-    @user = get_user_by_name(user_name)
+    statement = db.prepare('SELECT * FROM user WHERE name = ?')
+    @user = statement.execute(user_name).first
+    statement.close
 
     if @user.nil?
       return 404
@@ -286,7 +296,7 @@ class App < Sinatra::Base
     @self_profile = user['id'] == @user['id']
     erb :profile
   end
-
+  
   get '/add_channel' do
     if user.nil?
       return redirect '/login', 303
@@ -306,29 +316,11 @@ class App < Sinatra::Base
     if name.nil? || description.nil?
       return 400
     end
-    # statement = db.prepare('INSERT INTO channel (name, description, updated_at, created_at) VALUES (?, ?, NOW(), NOW())')
-    # statement.execute(name, description)
-    # channel_id = db.last_id
-    # statement.close
-
-    # Save channel
-    _channel, id = redis.zrange(all_channels_order_by_id_key, -1, -1, with_scores: true).last # get max id
-    new_id = id.to_i + 1
-    now = Time.now
-    attributes = {
-      'id': new_id,
-      'name': name,
-      'description': description,
-      'updated_at': now.to_s,
-      'created_at': now.to_s,
-    }
-    redis.zadd(all_channels_order_by_id_key, [new_id, attributes.to_json])
-
-    # Refresh all_channel_ids
-    ids = get_all_channel_ids << new_id
-    redis.set(all_channel_ids_key, ids)
-
-    redirect "/channel/#{new_id}", 303
+    statement = db.prepare('INSERT INTO channel (name, description, updated_at, created_at) VALUES (?, ?, NOW(), NOW())')
+    statement.execute(name, description)
+    channel_id = db.last_id
+    statement.close
+    redirect "/channel/#{channel_id}", 303
   end
 
   post '/profile' do
@@ -360,40 +352,43 @@ class App < Sinatra::Base
         data = file[:tempfile].read
         digest = Digest::SHA1.hexdigest(data)
 
-        avatar_name = "#{digest}#{Time.now.to_i}#{ext}"
+        avatar_name = digest + ext
         avatar_data = data
       end
     end
 
     if !avatar_name.nil? && !avatar_data.nil?
+    #  statement = db.prepare('INSERT INTO image (name, data) VALUES (?, ?)')
+    #  statement.execute(avatar_name, avatar_data)
+    #  statement.close
       File.write(image_file_path(avatar_name), avatar_data)
-
-      user["avatar_icon"] = avatar_name
+      statement = db.prepare('UPDATE user SET avatar_icon = ? WHERE id = ?')
+      statement.execute(avatar_name, user['id'])
+      statement.close
     end
 
     if !display_name.nil? || !display_name.empty?
-      user["display_name"] = display_name
+      statement = db.prepare('UPDATE user SET display_name = ? WHERE id = ?')
+      statement.execute(display_name, user['id'])
+      statement.close
     end
-
-    set_user(user)
 
     redirect '/', 303
   end
 
-  # Deprecated
-  # get '/icons/:file_name' do
-  #   file_name = params[:file_name]
-  #   statement = db.prepare('SELECT * FROM image WHERE name = ?')
-  #   row = statement.execute(file_name).first
-  #   statement.close
-  #   ext = file_name.include?('.') ? File.extname(file_name) : ''
-  #   mime = ext2mime(ext)
-  #   if !row.nil? && !mime.empty?
-  #     content_type mime
-  #     return row['data']
-  #   end
-  #   404
-  # end
+  get '/icons/:file_name' do
+    file_name = params[:file_name]
+    statement = db.prepare('SELECT * FROM image WHERE name = ?')
+    row = statement.execute(file_name).first
+    statement.close
+    ext = file_name.include?('.') ? File.extname(file_name) : ''
+    mime = ext2mime(ext)
+    if !row.nil? && !mime.empty?
+      content_type mime
+      return row['data']
+    end
+    404
+  end
 
   private
 
@@ -413,96 +408,17 @@ class App < Sinatra::Base
   end
 
   def db_get_user(user_id)
-    user_data = redis.get "users:#{user_id}"
-    if user_data
-      JSON.load(user_data)
-    else
-      nil
-    end
-  end
-
-  def initialize_user
-    users = db.prepare('SELECT * FROM user').execute
-    redis.set "user_key", users.size
-    redis.mset users.map{|h| ["users:#{h['id']}", h.to_json]}.flatten
-    redis.mset users.map{|h| ["user_name:#{h['name']}", h['id']]}.flatten
-  end
-
-  def get_user_by_name(name)
-    id = redis.get "user_name:#{name}"
-    JSON.load(redis.get("users:#{id}"))
-  end
-
-  def get_users_by_ids(ids)
-    return [] if ids.size == 0
-    redis.mget(*ids.map{|id| "users:#{id}"}).map{|d| JSON.load(d)}
-  end
-
-  def set_user(user)
-    redis.set "users:#{user['id']}", user.to_json
-  end
-
-  def initialize_message
-    messages = db.prepare('SELECT * FROM message').execute
-
-    redis.set "message_key", messages.size
-    messages.group_by{|h| h['channel_id']}.each do |channel_id, messages|
-      messages.each do |h|
-        redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
-      end
-    end
-  end
-
-  def initialize_channel_message_count
-    channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
-    redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+    statement = db.prepare('SELECT * FROM user WHERE id = ?')
+    user = statement.execute(user_id).first
+    statement.close
+    user
   end
 
   def db_add_message(channel_id, user_id, content)
-
-    id = redis.incr "message_key"
-    data = {
-      id: id,
-      user_id: user_id,
-      channel_id: channel_id,
-      content: content,
-      created_at: Time.now,
-    }
-    redis.zadd "messages:#{channel_id}", id, data.to_json
-    redis.incr "channel_message_count:#{channel_id}"
-
-    data
-  end
-
-  def get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: 0, limit: 100, offset: 0)
-    data = redis.zrevrangebyscore("messages:#{channel_id}", 100_000_000, (last_message_id.to_i + 1), :limit => [offset, limit])
-
-    if data
-      data.map{|d| d=JSON.load(d);d['created_at'] = Time.parse(d['created_at']);d}
-    else
-      nil
-    end
-  end
-
-  def channel_message_count(channel_id)
-    redis.get "channel_message_count:#{channel_id}"
-  end
-
-  def set_user_channel_message_count(user_id, channel_id)
-    count = channel_message_count(channel_id)
-    redis.set "user_channel_message_count:#{user_id}:#{channel_id}", count
-  end
-
-  def get_channel_messge_count(channel_id)
-    redis.get("channel_message_count:#{channel_id}").to_i
-  end
-
-  def get_channel_message_counts(channel_ids)
-    redis.mget(*channel_ids.map{|id| "channel_message_count:#{id}"}).map(&:to_i)
-  end
-
-  def get_user_channel_message_counts(user_id, channel_ids)
-    redis.mget(*channel_ids.map{|id| "user_channel_message_count:#{user_id}:#{id}"}).map(&:to_i)
+    statement = db.prepare('INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())')
+    messages = statement.execute(channel_id, user_id, content)
+    statement.close
+    messages
   end
 
   def random_string(n)
@@ -512,30 +428,11 @@ class App < Sinatra::Base
   def register(user, password)
     salt = random_string(20)
     pass_digest = Digest::SHA1.hexdigest(salt + password)
-
-    # 文字数
-    if user.length > 191
-      raise "register"
-    end
-
-    id = redis.get "user_name:#{user}"
-    if id
-      raise "register"
-    end
-
-    id = redis.incr "user_key"
-    data = {
-      id: id,
-      name: user,
-      salt: salt,
-      password: pass_digest,
-      display_name: user,
-      avatar_icon: 'default.png',
-    }
-    redis.set "users:#{id}", data.to_json
-    redis.set "user_name:#{user}", id
-
-    id
+    statement = db.prepare('INSERT INTO user (name, salt, password, display_name, avatar_icon, created_at) VALUES (?, ?, ?, ?, ?, NOW())')
+    statement.execute(user, salt, pass_digest, user, 'default.png')
+    row = db.query('SELECT LAST_INSERT_ID() AS last_insert_id').first
+    statement.close
+    row['last_insert_id']
   end
 
   def get_channel_list_info(focus_channel_id = nil)

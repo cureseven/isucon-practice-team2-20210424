@@ -1,12 +1,14 @@
 gogo:
 	sudo systemctl stop nginx
 	sudo systemctl stop isubata.ruby.service
+	ssh isucon7-q-c "sudo systemctl stop isubata.ruby.service"
 	ssh isucon7-q-b "sudo systemctl stop mysql"
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
 	sudo truncate --size 0 /var/log/mysql/slow.log
 	ssh isucon7-q-b "sudo systemctl start mysql" 
 	sudo systemctl start isubata.ruby.service
+	ssh isucon7-q-c "sudo systemctl start isubata.ruby.service" 
 	sudo systemctl start nginx
 	sleep 6
 	$(MAKE) bench
