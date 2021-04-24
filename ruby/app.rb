@@ -38,6 +38,25 @@ class App < Sinatra::Base
     def public_path
       File.expand_path('../../public', __FILE__)
     end
+
+    def all_channels_order_by_id_key
+      "all_channels_order_by_id"
+    end
+
+    def get_all_channels_order_by_id
+      rows = redis.zrange(all_channels_order_by_id_key, 0, -1)
+      if rows.length == 0
+        set_all_channels_order_by_id
+      else
+        rows.map {|row| JSON.parse(row) }
+      end
+    end
+
+    def set_all_channels_order_by_id
+      channels = db.query('SELECT * FROM channel ORDER BY id').to_a
+      redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
+      channels
+    end
   end
 
   get '/initialize' do
@@ -388,7 +407,7 @@ class App < Sinatra::Base
   end
 
   def get_channel_list_info(focus_channel_id = nil)
-    channels = db.query('SELECT * FROM channel ORDER BY id').to_a
+    channels = get_all_channels_order_by_id
     description = ''
     channels.each do |channel|
       if channel['id'] == focus_channel_id
