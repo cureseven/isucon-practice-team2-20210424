@@ -87,7 +87,6 @@ class App < Sinatra::Base
     users.each do |u|
       redis.zadd *["users:#{u['name']}", u['id'], u.to_json]
     end
-    users.close
     users
   end
 
