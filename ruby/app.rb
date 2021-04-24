@@ -158,7 +158,7 @@ class App < Sinatra::Base
       return 403
     end
 
-    # sleep 1.0
+    sleep 1.0
 
     statement = db.prepare('SELECT c.id, h.message_id FROM channel c left join haveread h on c.id = h.channel_id and h.user_id = ?')
     rows = statement.execute(user_id).to_a
