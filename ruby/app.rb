@@ -173,6 +173,7 @@ class App < Sinatra::Base
   end
 
   post '/login' do
+    sleep 1
     name = params[:name]
     statement = db.prepare('SELECT * FROM user WHERE name = ?')
     row = statement.execute(name).first
