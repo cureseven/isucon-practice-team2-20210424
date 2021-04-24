@@ -84,7 +84,6 @@ class App < Sinatra::Base
   # user.idでソートしたuserを「users:user_name」みたいなキーで保存
   def initialize_user
     users = db.prepare('SELECT * FROM users').execute
-    redis.set "use_key", users.size
     users.each do |u|
       redis.zadd *["users:#{u['name']}", u['id'], u.to_json]
     end
