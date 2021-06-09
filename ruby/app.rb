@@ -49,6 +49,19 @@ class App < Sinatra::Base
       "all_channels_order_by_id"
     end
 
+    def all_channel_ids_key
+      "all_channel_ids"
+    end
+
+    def get_all_channel_ids
+      ids_json = redis.get(all_channel_ids_key)
+      if ids_json
+        JSON.parse(ids_json)
+      else
+        set_all_channel_ids
+      end
+    end
+
     def get_all_channels_order_by_id
       rows = redis.zrange(all_channels_order_by_id_key, 0, -1)
       if rows.length == 0
@@ -58,10 +71,33 @@ class App < Sinatra::Base
       end
     end
 
+    def set_all_channel_ids
+      ids = db.query('SELECT id FROM channel').to_a.map{|row| row['id'] }
+      redis.set(all_channel_ids_key, ids.to_json)
+      ids
+    end
+
+    def set_user_channel_message_count(user_id, channel_id)
+      count = channel_message_count(channel_id)
+      redis.set "user_channel_message_count:#{user_id}:#{channel_id}", count
+    end
+
     def set_all_channels_order_by_id
       channels = db.query('SELECT * FROM channel ORDER BY id').to_a
       redis.zadd(all_channels_order_by_id_key, channels.map{ |c| [c['id'], c.to_json] })
       channels
+    end
+
+    def get_channel_message_counts(channel_ids)
+      redis.mget(*channel_ids.map{|id| "channel_message_count:#{id}"}).map(&:to_i)
+    end
+
+    def get_user_channel_message_counts(user_id, channel_ids)
+      redis.mget(*channel_ids.map{|id| "user_channel_message_count:#{user_id}:#{id}"}).map(&:to_i)
+    end
+
+    def channel_message_count(channel_id)
+      redis.get "channel_message_count:#{channel_id}"
     end
 
     def initialize_message
@@ -73,11 +109,13 @@ class App < Sinatra::Base
           redis.zadd *["messages:#{channel_id}", h['id'], h.to_json]
         end
       end
+      messages.close
     end
 
     def initialize_channel_message_count
       channel_count = db.prepare('SELECT channel_id, COUNT(*) AS cnt FROM message GROUP BY channel_id').execute
       redis.mset *channel_count.map{|h| ["channel_message_count:#{h['channel_id']}", h['cnt']]}.flatten
+      channel_count.close
     end
   end
 
@@ -89,7 +127,7 @@ class App < Sinatra::Base
     db.query("DELETE FROM haveread")
     redis.flushall
     # messageに複合インデックス (id,channel_id)を貼る
-    db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
+    # db.query("CREATE INDEX indexes_id_channel_id ON message(id,channel_id)")
     initialize_channel_message_count
     initialize_message
     204
@@ -141,6 +179,7 @@ class App < Sinatra::Base
     statement = db.prepare('SELECT * FROM user WHERE name = ?')
     row = statement.execute(name).first
     if row.nil? || row['password'] != Digest::SHA1.hexdigest(row['salt'] + params[:password])
+      statement.close
       return 403
     end
     session[:user_id] = row['id']
@@ -172,8 +211,8 @@ class App < Sinatra::Base
 
     channel_id = params[:channel_id].to_i
     last_message_id = params[:last_message_id].to_i
-    statement = db.prepare('SELECT * FROM message WHERE id > ? AND channel_id = ? ORDER BY id DESC LIMIT 100')
-    rows = statement.execute(last_message_id, channel_id).to_a
+    rows = get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: last_message_id)
+    
     response = []
     rows.each do |row|
       r = {}
@@ -186,16 +225,8 @@ class App < Sinatra::Base
       statement.close
     end
     response.reverse!
+    set_user_channel_message_count(user_id, channel_id)
 
-    max_message_id = rows.empty? ? 0 : rows.map { |row| row['id'] }.max
-    statement = db.prepare([
-      'INSERT INTO haveread (user_id, channel_id, message_id, updated_at, created_at) ',
-      'VALUES (?, ?, ?, NOW(), NOW()) ',
-      'ON DUPLICATE KEY UPDATE message_id = ?, updated_at = NOW()',
-    ].join)
-    statement.execute(user_id, channel_id, max_message_id, max_message_id)
-    statement.close
-    
     content_type :json
     response.to_json
   end
@@ -208,24 +239,18 @@ class App < Sinatra::Base
 
     sleep 1.0
 
-    rows = db.query('SELECT id FROM channel').to_a
-    channel_ids = rows.map { |row| row['id'] }
-
+    channel_ids = get_all_channel_ids
+    channel_message_counts = get_channel_message_counts(channel_ids)
+    user_channel_message_counts = get_user_channel_message_counts(user_id, channel_ids)
     res = []
-    channel_ids.each do |channel_id|
-      statement = db.prepare('SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?')
-      row = statement.execute(user_id, channel_id).first
-      statement.close
+    channel_ids.each do |channel_id, index|
       r = {}
       r['channel_id'] = channel_id
-      r['unread'] = if row.nil?
-        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
-        statement.execute(channel_id).first['cnt']
-      else
-        statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id')
-        statement.execute(channel_id, row['message_id']).first['cnt']
+      unread = channel_message_counts[index]
+      if user_channel_message_counts[index] != 0
+        unread = channel_message_counts[index] - user_channel_message_counts[index]
       end
-      statement.close
+      r['unread'] = unread
       res << r
     end
 
@@ -250,9 +275,8 @@ class App < Sinatra::Base
     @page = @page.to_i
 
     n = 20
-    statement = db.prepare('SELECT * FROM message WHERE channel_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
-    rows = statement.execute(@channel_id, n, (@page - 1) * n).to_a
-    statement.close
+    rows = get_message_by_channel_id_and_last_message_id(@channel_id, offset: (@page - 1) * n, limit: n)
+
     @messages = []
     rows.each do |row|
       r = {}
@@ -266,9 +290,7 @@ class App < Sinatra::Base
     end
     @messages.reverse!
 
-    statement = db.prepare('SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?')
-    cnt = statement.execute(@channel_id).first['cnt'].to_f
-    statement.close
+    cnt = get_channel_messge_count(@channel_id).to_f
     @max_page = cnt == 0 ? 1 :(cnt / n).ceil
 
     return 400 if @page > @max_page
@@ -316,11 +338,23 @@ class App < Sinatra::Base
     if name.nil? || description.nil?
       return 400
     end
-    statement = db.prepare('INSERT INTO channel (name, description, updated_at, created_at) VALUES (?, ?, NOW(), NOW())')
-    statement.execute(name, description)
-    channel_id = db.last_id
-    statement.close
-    redirect "/channel/#{channel_id}", 303
+    _channel, id = redis.zrange(all_channels_order_by_id_key, -1, -1, with_scores: true).last # get max id
+    new_id = id.to_i + 1
+    now = Time.now
+    attributes = {
+      'id': new_id,
+      'name': name,
+      'description': description,
+      'updated_at': now.to_s,
+      'created_at': now.to_s,
+    }
+    redis.zadd(all_channels_order_by_id_key, [new_id, attributes.to_json])
+
+    # Refresh all_channel_ids
+    ids = get_all_channel_ids << new_id
+    redis.set(all_channel_ids_key, ids)
+
+    redirect "/channel/#{new_id}", 303
   end
 
   post '/profile' do
@@ -415,10 +449,28 @@ class App < Sinatra::Base
   end
 
   def db_add_message(channel_id, user_id, content)
-    statement = db.prepare('INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())')
-    messages = statement.execute(channel_id, user_id, content)
-    statement.close
-    messages
+    id = redis.incr "message_key"
+    data = {
+      id: id,
+      user_id: user_id,
+      channel_id: channel_id,
+      content: content,
+      created_at: Time.now,
+    }
+    redis.zadd "messages:#{channel_id}", id, data.to_json
+    redis.incr "channel_message_count:#{channel_id}"
+
+    data
+  end
+
+  def get_message_by_channel_id_and_last_message_id(channel_id, last_message_id: 0, limit: 100, offset: 0)
+    data = redis.zrevrangebyscore("messages:#{channel_id}", 100_000_000, (last_message_id.to_i + 1), :limit => [offset, limit])
+
+    if data
+      data.map{|d| d=JSON.load(d);d['created_at'] = Time.parse(d['created_at']);d}
+    else
+      nil
+    end
   end
 
   def random_string(n)
@@ -445,6 +497,10 @@ class App < Sinatra::Base
       end
     end
     [channels, description]
+  end
+
+  def get_channel_messge_count(channel_id)
+    redis.get("channel_message_count:#{channel_id}").to_i
   end
 
   def ext2mime(ext)
